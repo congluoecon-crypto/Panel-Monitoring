@@ -44,12 +44,12 @@ import multiprocessing as mp
 # ============================================================
 # CONFIG
 # ============================================================
-TEST_MODE = True          # <-- set to False for the real 2500-rep run
+TEST_MODE = False           # <-- set to False for the real 2500-rep run
 R_FULL = 2500
 R_TEST = 3
 N_WORKERS = 8
 CHECKPOINT_SECONDS = 3600
-OUTPUT_DIR = "."           # change to your desired output folder
+OUTPUT_DIR = "d:\Cong Graduate\full_simulation"           # change to your desired output folder
 PROGRESS_FILE = os.path.join(OUTPUT_DIR, "progress_latest.xlsx")
 
 N_LIST = [10, 30]
@@ -59,7 +59,7 @@ DELTA_LIST = [1, 2, 3]
 K_LIST = [0.2, 0.3, 0.5, 1, 2, 3]
 
 A2 = {"10%": 6.2514, "5%": 7.8147, "1%": 11.3449}
-LEVELS = ["10%", "5%", "1%"]
+LEVELS = ["10%", "5%", "1%"]        
 
 
 # ============================================================
@@ -383,7 +383,7 @@ def main():
     # final write: overwrite progress file + a timestamped final copy
     write_progress(rows_A, rows_B)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_path = os.path.join(OUTPUT_DIR, f"final_results_{ts}.xlsx")
+    final_path = os.path.join(OUTPUT_DIR, f"fiFnal_results_{ts}.xlsx")
     with pd.ExcelWriter(final_path, engine="openpyxl") as writer:
         pd.DataFrame(rows_A).to_excel(writer, sheet_name="scenario_A", index=False)
         pd.DataFrame(rows_B).to_excel(writer, sheet_name="scenario_B", index=False)
