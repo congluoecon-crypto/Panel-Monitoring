@@ -49,7 +49,7 @@ R_FULL = 2500
 R_TEST = 3
 N_WORKERS = 8
 CHECKPOINT_SECONDS = 3600
-OUTPUT_DIR = "d:\Cong Graduate\full_simulation"           # change to your desired output folder
+OUTPUT_DIR = "d:\\Cong Graduate\\full_simulation"           # change to your desired output folder
 PROGRESS_FILE = os.path.join(OUTPUT_DIR, "progress_latest.xlsx")
 
 N_LIST = [10, 30]
