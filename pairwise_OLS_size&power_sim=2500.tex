@@ -1,0 +1,832 @@
+\documentclass[12pt]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{natbib}
+\usepackage{hyperref}
+
+\geometry{margin=1in}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+\title{Sequential Monitoring for Structural Breaks in Heterogeneous Panels:\\
+Design, Derivations, and Computational Details}
+
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+This note describes a Monte Carlo study of a real-time structural break
+monitoring procedure for heterogeneous panels. The procedure works in three
+steps: (1) each series is pre-filtered by an autoregression estimated on a
+calibration sample; (2) the filtered residuals are aggregated across series
+via $N(N-1)$ separate (unpooled) pairwise regressions, one OLS fit per
+ordered pair of series; (3) the cumulative sum of squares (CUSQ) of
+the aggregate residual is compared period by period against a boundary
+derived from the Brownian bridge, following \citet{WangHsiao2013}. The note
+gives the exact data generating processes, a closed-form derivation showing
+that the $N(N-1)$-pair aggregation, even though every pair has its own
+fitted slope, can be evaluated exactly as a weighted cross-sectional average
+without ever materializing the $N(N-1)$ residual series, the two-scenario
+Monte Carlo design (size under no break, power and
+detection delay under a known break), and two computational improvements
+--- FFT-based fractional differencing and vectorized AR residuals --- that
+make the full $1.9\times10^6$-replication design feasible without changing
+any statistic. A companion design adds four targeted power experiments ---
+common-factor and subgroup-specific volatility breaks, and common-factor
+and subgroup-specific loading breaks --- built on the same AR-filtering,
+pairwise-aggregation, and CUSQ machinery.
+\end{abstract}
+
+\section{Setup}
+\label{sec:setup}
+
+We observe a panel of $N$ time series $\{Y_{i,t}\}$ for $i=1,\dots,N$ and
+$t=1,\dots,T$. The first $M$ periods form the calibration sample, assumed to
+be free of breaks. From period $M+1$ onward the monitor checks, one period at
+a time, whether the panel has shifted.
+
+The null and alternative hypotheses are
+\[
+H_0:\ \text{no break for any } t > M,
+\]
+\[
+H_1:\ \text{all } N \text{ series shift by } \delta \neq 0
+      \text{ at some time } \tau > M.
+\]
+
+Sections~\ref{sec:dgp}--\ref{sec:cusum} describe the four steps of the
+procedure: data generation, AR filtering, cross-sectional aggregation, and
+the CUSQ test. Section~\ref{sec:mc} describes the Monte Carlo design,
+Section~\ref{sec:targeted} describes four additional targeted power
+experiments built on the same monitoring procedure, and
+Section~\ref{sec:computation} documents the computational improvements.
+
+\section{Data Generating Processes}
+\label{sec:dgp}
+
+\subsection{Panel series}
+
+Each series follows an ARFIMA$(p_i,d_i,q_i)$ model,
+\[
+\Phi_i(L)(1-L)^{d_i}Y_{i,t} = \Theta_i(L)\,\varepsilon_{i,t},
+\qquad \varepsilon_{i,t} \sim \text{i.i.d.}\; N(0,1),
+\]
+where $\Phi_i(L)=1-\phi_i L$ and $\Theta_i(L)=1+\theta_i L$ are at most
+first-order polynomials and $(1-L)^{d_i}$ is the fractional differencing
+operator. Two panel sizes are used.
+
+\paragraph{$N=10$.} Five pairs of series, each pair sharing the same
+parameters (Table~\ref{tab:N10}).
+
+\begin{table}[h]
+\centering
+\caption{DGP for $N=10$.}
+\label{tab:N10}
+\begin{tabular}{ccccc}
+\toprule
+Series & Model & $\phi_i$ & $d_i$ & $\theta_i$ \\
+\midrule
+$1,2$  & ARMA$(1,1)$     & $0.8$ & $0$   & $0.5$ \\
+$3,4$  & ARMA$(1,1)$     & $0.5$ & $0$   & $0.3$ \\
+$5,6$  & ARFIMA$(0,d,0)$ & $0$   & $0.4$ & $0$   \\
+$7,8$  & ARFIMA$(1,d,1)$ & $0.1$ & $0.3$ & $0.8$ \\
+$9,10$ & ARFIMA$(1,d,0)$ & $0.7$ & $0.4$ & $0$   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{$N=30$.} A random-coefficient panel divided into four blocks
+(Table~\ref{tab:N30}). The coefficients are drawn independently for each
+series and for each Monte Carlo replication. This means the simulation
+averages over both the randomness in the coefficients and the randomness in
+the innovations, giving a measure of average performance across the whole
+class of DGPs described in the table rather than performance at one fixed
+parameter vector.
+
+\begin{table}[h]
+\centering
+\caption{DGP for $N=30$ (random coefficients, redrawn each replication).}
+\label{tab:N30}
+\begin{tabular}{ccccc}
+\toprule
+Series & Model & $\phi_i$ & $d_i$ & $\theta_i$ \\
+\midrule
+$1$--$15$  & ARMA$(1,1)$     & $U(0,\,0.5)$   & $0$            & $0.6$ \\
+$16$--$20$ & ARMA$(1,1)$     & $U(0.7,\,0.9)$ & $0$            & $0.6$ \\
+$21$--$25$ & ARFIMA$(0,d,0)$ & $0$            & $U(0,\,0.5)$   & $0$   \\
+$26$--$30$ & ARFIMA$(1,d,1)$ & $U(0,\,0.4)$   & $U(0,\,0.5)$   & $U(0,\,0.3)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Common factors}
+
+Four common factors are generated independently of the panel series
+(Table~\ref{tab:factors}). They cover i.i.d.\ noise, a near-unit-root AR(1),
+and two long-memory processes.
+
+\begin{table}[h]
+\centering
+\caption{Common factor DGPs.}
+\label{tab:factors}
+\begin{tabular}{cccc}
+\toprule
+Factor & Model & $\phi$ & $d$ \\
+\midrule
+1 & i.i.d.\ $N(0,1)$  & $0$    & $0$    \\
+2 & AR$(1)$           & $0.99$ & $0$    \\
+3 & ARFIMA$(0,d,0)$   & $0$    & $0.20$ \\
+4 & ARFIMA$(0,d,0)$   & $0$    & $0.45$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Observed data and break injection}
+
+The observed series add a common factor with loading $\lambda = 0.5$:
+\begin{equation}
+Y^{*}_{i,t} = Y_{i,t} + 0.5\,f_t, \qquad i=1,\dots,N.
+\label{eq:factorload}
+\end{equation}
+Under $H_1$, a level shift of size $\delta$ is added at time $\tau$:
+\begin{equation}
+Y^{**}_{i,t} = Y^{*}_{i,t} + \delta \cdot \mathbf{1}\{t \ge \tau\},
+\qquad i=1,\dots,N.
+\label{eq:break}
+\end{equation}
+The break time $\tau$ is specified in Section~\ref{subsec:scenarioB}.
+
+\section{AR Pre-Filtering}
+\label{sec:arfilter}
+
+For each series $i$, we fit an AR($p$) model on the calibration sample
+$t=1,\dots,M$, where
+\begin{equation}
+p = \max\!\left(3,\; 3\left\lfloor\frac{M-1}{100}\right\rfloor\right).
+\label{eq:p}
+\end{equation}
+The OLS estimate from the calibration sample is
+\begin{equation}
+\hat\beta_{AR} = \arg\min_{b\in\mathbb{R}^p}
+\sum_{t=p+1}^{M}
+\Bigl(Y_{i,t} - b'(Y_{i,t-1},\dots,Y_{i,t-p})'\Bigr)^2.
+\label{eq:arcal}
+\end{equation}
+This estimate is fixed after period $M$ and never updated. For all
+$t = p+1,\dots,T$, the one-step-ahead residual is
+\begin{equation}
+\hat e_{i,t} = Y_{i,t} - \hat\beta_{AR}'(Y_{i,t-1},\dots,Y_{i,t-p})'.
+\label{eq:residual}
+\end{equation}
+The first seven observations are discarded as a burn-in. Fixing the AR
+coefficients after calibration is the key sequential monitoring requirement:
+parameters are estimated from clean data and then held constant, so the
+monitoring period residuals are not used to update the model.
+
+\section{Cross-Sectional Aggregation}
+\label{sec:pool}
+
+\subsection{Unpooled pairwise regression}
+
+Let $\hat e_{i,t}$ denote the AR residuals for $i=1,\dots,N$ and
+$t=1,\dots,T$. For every ordered pair $(i,j)$ with $i\ne j$ (there are
+$N(N-1)$ such pairs), we fit a \emph{separate} calibration-period
+regression
+\begin{equation}
+\hat e_{i,t} = \alpha_{ij} + \beta_{ij}\,\hat e_{j,t} + u_{i,j,t},
+\qquad t=1,\dots,M.
+\label{eq:pairreg}
+\end{equation}
+Unlike a pooled specification, the $N(N-1)$ regressions are \emph{not}
+stacked into a single sample: each pair $(i,j)$ has its own OLS estimate
+$(\hat\alpha_{ij},\hat\beta_{ij})$, computed using only that pair's $M$
+calibration observations. As with the AR coefficients of
+Section~\ref{sec:arfilter}, $(\hat\alpha_{ij},\hat\beta_{ij})$ are estimated
+once from the calibration sample and then held fixed for every
+$t=1,\dots,T$. For all $t$, the residual from pair $(i,j)$'s regression is
+\begin{equation}
+U_{i,j,t} = \hat e_{i,t} - \hat\alpha_{ij} - \hat\beta_{ij}\,\hat e_{j,t}.
+\label{eq:Uijt}
+\end{equation}
+The aggregate signal used in the CUSQ test is, as before, the average of
+$U_{i,j,t}$ over all ordered pairs:
+\begin{equation}
+\bar e_t \equiv
+\frac{1}{N(N-1)}\sum_{\substack{i,j=1\\i\ne j}}^{N} U_{i,j,t},
+\qquad t=1,\dots,T.
+\label{eq:ebar_def}
+\end{equation}
+As stated, computing \eqref{eq:ebar_def} requires fitting all $N(N-1)$
+pairs and forming all $N(N-1)$ residual sequences --- an $O(N^2M)$
+estimation step followed by an $O(N^2T)$ evaluation step. The next two
+propositions show that every $(\hat\alpha_{ij},\hat\beta_{ij})$, and hence
+$\bar e_t$, can be obtained in closed form at a total cost of $O(N^2M)$
+(estimation) plus $O(NT)$ (evaluation), without ever materializing the
+$N(N-1)$ residual series and without any approximation.
+
+\subsection{Closed form for $(\hat\alpha_{ij},\hat\beta_{ij})$}
+
+Define the per-series calibration mean
+\begin{equation}
+\mu_i \equiv \frac{1}{M}\sum_{t=1}^{M}\hat e_{i,t}, \qquad i=1,\dots,N,
+\label{eq:mu}
+\end{equation}
+and the demeaned residual, held fixed and applied to \emph{every} $t$ (not
+only the calibration sample),
+\begin{equation}
+f_{i,t} \equiv \hat e_{i,t} - \mu_i, \qquad t=1,\dots,T.
+\label{eq:fit}
+\end{equation}
+Let $d_{i,t} \equiv f_{i,t}$ for $t \le M$ denote the calibration-period
+values, and define the $N\times N$ Gram matrix of calibration-period
+centered residuals
+\begin{equation}
+S_{ij} \equiv \sum_{t=1}^{M} d_{i,t}\,d_{j,t}, \qquad i,j=1,\dots,N.
+\label{eq:Sij}
+\end{equation}
+
+\begin{proposition}
+\label{prop:ab}
+The single-pair OLS estimates from \eqref{eq:pairreg} are, for $i\ne j$,
+\begin{equation}
+\hat\beta_{ij} = \frac{S_{ij}}{S_{jj}}, \qquad
+\hat\alpha_{ij} = \mu_i - \hat\beta_{ij}\,\mu_j.
+\label{eq:abclosed}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+For a fixed pair $(i,j)$, \eqref{eq:pairreg} is an ordinary simple linear
+regression of $\hat e_{i,t}$ on $\hat e_{j,t}$ over $t=1,\dots,M$, with no
+pooling across pairs. Its OLS slope is the ratio of the sample covariance
+of $(\hat e_{i,t},\hat e_{j,t})$ to the sample variance of $\hat e_{j,t}$:
+$\sum_t d_{i,t}d_{j,t}\big/\sum_t d_{j,t}^2 = S_{ij}/S_{jj}$. The intercept
+follows from the standard simple-regression identity
+$\hat\alpha_{ij} = \mu_i - \hat\beta_{ij}\mu_j$.
+\end{proof}
+
+\subsection{Closed form for $\bar e_t$}
+
+Define the cross-sectional sum of the centered residuals,
+$F_t \equiv \sum_{i=1}^N f_{i,t}$, and, for each $j$, the column sum of
+the fixed pairwise slopes excluding the diagonal,
+\begin{equation}
+c_j \equiv \sum_{i\ne j} \hat\beta_{ij}, \qquad j=1,\dots,N.
+\label{eq:cj}
+\end{equation}
+
+\begin{proposition}
+\label{prop:ebar}
+For every $t=1,\dots,T$,
+\begin{equation}
+\bar e_t = \frac{(N-1)F_t - \displaystyle\sum_{j=1}^N c_j f_{j,t}}{N(N-1)}.
+\label{eq:ebarclosed}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+By \eqref{eq:abclosed}, $\hat\alpha_{ij}+\hat\beta_{ij}\mu_j=\mu_i$, so
+$U_{i,j,t}=\hat e_{i,t}-\hat\alpha_{ij}-\hat\beta_{ij}\hat e_{j,t}
+=f_{i,t}-\hat\beta_{ij}f_{j,t}$. Expanding \eqref{eq:ebar_def}:
+\[
+\bar e_t = \frac{1}{N(N-1)}\sum_{i\ne j}\bigl(f_{i,t}-\hat\beta_{ij}f_{j,t}\bigr)
+= \frac{1}{N(N-1)}\left[\sum_{i\ne j} f_{i,t}
+  - \sum_{i\ne j}\hat\beta_{ij}f_{j,t}\right].
+\]
+In the first sum, $f_{i,t}$ is added once for every $j\ne i$, i.e.\ $N-1$
+times for each $i$, so $\sum_{i\ne j}f_{i,t}=(N-1)F_t$. In the second sum,
+regrouping by $j$ gives $\sum_{i\ne j}\hat\beta_{ij}f_{j,t}
+=\sum_j f_{j,t}\sum_{i\ne j}\hat\beta_{ij}=\sum_j c_j f_{j,t}$. Combining
+the two terms gives \eqref{eq:ebarclosed}.
+\end{proof}
+
+\begin{remark}
+Unlike under pooling, the $N(N-1)$ pairwise regressions here do
+\emph{not} share a common slope, so $\bar e_t$ is no longer a simple
+affine map of the plain cross-sectional mean: each series $j$ contributes
+through $f_{j,t}$ with its own pair-specific weight $c_j$.
+\eqref{eq:ebarclosed} is nonetheless exact and never requires forming the
+$N(N-1)$ residual series. The cost is $O(N^2M)$ to form $S$ (and hence
+every $\hat\beta_{ij}$ and $c_j$) once from the calibration sample, plus
+$O(NT)$ to evaluate $\bar e_t$ for the full sample --- versus $O(N^2T)$
+for a direct, pair-by-pair evaluation. For $N=30$ this still replaces an
+$N(N-1)=870$-pair construction with one $30\times30$ Gram matrix and a
+single weighted cross-sectional average.
+\end{remark}
+
+\section{The CUSQ Statistic and Monitoring Boundary}
+\label{sec:cusum}
+
+\subsection{Statistic}
+
+Let $C_l = \sum_{t=1}^{l}\bar e_t^2$ be the cumulative sum of squares of
+$\bar e_t$. Following \citet{WangHsiao2013} (p.~5), the centered CUSQ for
+$n \ge m$ is
+\begin{equation}
+D_n \equiv \frac{C_n}{C_m} - \frac{n-2}{m-2},
+\label{eq:Dn}
+\end{equation}
+and the detector is
+\begin{equation}
+T_n \equiv \sqrt{\frac{m}{2}}\,D_n
+     = \sqrt{\frac{m}{2}}\left(\frac{C_n}{C_m} - \frac{n-2}{m-2}\right).
+\label{eq:Tn}
+\end{equation}
+This is equivalent to $T_n = m^{-1/2}\hat{S}_n$ in the notation of
+\citet{WangHsiao2013}, where $\hat{S}_n = 2^{-1/2}m\hat{D}_n$.
+
+\subsection{Limiting distribution}
+
+Under $H_0$, \citet{WangHsiao2013} (Theorem~1) show that
+\begin{equation}
+T_n = m^{-1/2}\hat{S}_{[m\tau]} \;\Rightarrow\; W^0(\tau),
+\qquad \tau = \frac{n}{m} \ge 1,
+\label{eq:fclt}
+\end{equation}
+where $W^0(\tau) = W(\tau) - \tau W(1)$ is a Brownian bridge and $W(\tau)$
+is a standard Wiener process.
+
+\subsection{Monitoring boundary}
+
+Following \citet{ChuStinchcombeWhite1996}, the crossing probability of
+$W^0(\tau)$ satisfies \citep[eq.~(5)]{WangHsiao2013}:
+\begin{equation}
+P\bigl\{|W^0(\tau)| \ge (\tau-1)^{-1}[\tau(a^2+\ln\tau)]^{1/2}
+\ \text{for some}\ \tau \ge 1\bigr\}
+= 2[1-\Phi(a)] + a\phi(a),
+\label{eq:crossingprob}
+\end{equation}
+where $\Phi$ and $\phi$ are the standard-normal CDF and PDF. Setting the
+right-hand side equal to $\alpha$ and solving numerically gives
+\begin{equation}
+a^2_{10\%} = 6.2514, \qquad
+a^2_{5\%}  = 7.8147, \qquad
+a^2_{1\%}  = 11.3449.
+\label{eq:a2}
+\end{equation}
+\citet{WangHsiao2013} state $a^2_{5\%} = 7.78$ (rounded to two decimal
+places). Discretising $\lambda$ as $n/m$ yields the boundary function
+\citep[p.~6]{WangHsiao2013}:
+\begin{equation}
+g\!\left(\frac{n}{m};\,a^2_\alpha\right)
+= \frac{n-m}{m}
+  \left[\frac{n}{n-m}
+        \left(a^2_\alpha + \ln\frac{n}{n-m}\right)\right]^{1/2}.
+\label{eq:boundary}
+\end{equation}
+
+\section{Sequential Decision Rule}
+\label{sec:stopping}
+
+At each period $n > m$, compute $T_n$ from \eqref{eq:Tn} and compare it
+to the boundary $g(n/m;\,a^2_\alpha)$ from \eqref{eq:boundary}. The
+procedure declares a break at the first period where the statistic crosses
+the boundary:
+\begin{equation}
+\hat\tau_\alpha \equiv
+\inf\bigl\{n > m : |T_n| \ge g\!\left(n/m;\,a^2_\alpha\right)\bigr\},
+\label{eq:stoptime}
+\end{equation}
+with $\hat\tau_\alpha = +\infty$ if no crossing occurs before $T$. The AR
+coefficients $\hat\beta_{AR}$, the pairwise regression coefficients
+$(\hat\alpha_{ij},\hat\beta_{ij})$ for every $i\ne j$, and the per-series
+means $\mu_i$ are all fixed from the calibration period and never updated
+after $t=m$.
+
+\section{Monte Carlo Design}
+\label{sec:mc}
+
+The total sample length used in each replication is
+\begin{equation}
+T_{\text{total}} = 10M + 10,
+\label{eq:Ttotal}
+\end{equation}
+which provides a monitoring window of $9M$ periods beyond the calibration
+sample. Two scenarios are run.
+
+\subsection{Scenario A: size ($\delta=0$)}
+\label{subsec:scenarioA}
+
+No break is injected. Because the data do not depend on $k$, each
+simulated path yields one stopping time $\hat\tau_\alpha^{(r)}$, and
+this is scored against six window lengths
+$k\in\mathcal{K}=\{0.2,0.3,0.5,1,2,3\}$ at once:
+\begin{equation}
+A_\alpha^{(r)}(k) \equiv
+\mathbf{1}\bigl\{\hat\tau_\alpha^{(r)} \le M + kM\bigr\}.
+\label{eq:Aindicator}
+\end{equation}
+The empirical size is
+\begin{equation}
+\widehat{\mathrm{Size}}_\alpha(N,M,\mathrm{factor},k)
+= \frac{1}{R}\sum_{r=1}^{R} A_\alpha^{(r)}(k),
+\label{eq:size}
+\end{equation}
+which estimates the false alarm probability within the first $kM$ monitoring
+periods. A well-calibrated test should give
+$\widehat{\mathrm{Size}}_\alpha \approx \alpha$.
+
+\subsection{Scenario B: power ($\delta\in\{1,2,3\}$)}
+\label{subsec:scenarioB}
+
+A break of size $\delta$ is injected at
+\begin{equation}
+\tau(k) = M + \lfloor kM \rfloor, \qquad k\in\mathcal{K}.
+\label{eq:tauk}
+\end{equation}
+Here $k$ is the break location, not a scoring window. Each $(\delta,k)$
+combination requires its own set of replications because the data depend on
+$(\delta,k)$. The stopping time $\hat\tau_\alpha^{(r)}$ is compared to the
+true break date $\tau(k)$ and classified as one of three outcomes:
+\begin{align}
+P_\alpha^{(r)} &\equiv \mathbf{1}\{\hat\tau_\alpha^{(r)} \le \tau(k)\}
+  && \text{(alarm before the break)}, \label{eq:premature} \\
+D_\alpha^{(r)} &\equiv \mathbf{1}\{\tau(k) < \hat\tau_\alpha^{(r)} < \infty\}
+  && \text{(alarm after the break)}, \label{eq:detect} \\
+B_\alpha^{(r)} &\equiv P_\alpha^{(r)} + D_\alpha^{(r)}
+  = \mathbf{1}\{\hat\tau_\alpha^{(r)} < \infty\}
+  && \text{(any alarm).} \label{eq:anyalarm}
+\end{align}
+The Monte Carlo averages are
+\begin{equation}
+\widehat{P}_\alpha = \frac{1}{R}\sum_r P_\alpha^{(r)}, \qquad
+\widehat{D}_\alpha = \frac{1}{R}\sum_r D_\alpha^{(r)}, \qquad
+\widehat{B}_\alpha = \widehat{P}_\alpha + \widehat{D}_\alpha.
+\label{eq:PDhats}
+\end{equation}
+$\widehat{D}_\alpha$ is the power of the test --- the probability of
+detecting the break after it occurs. $\widehat{P}_\alpha$ is the
+premature alarm rate.
+
+For replications where $D_\alpha^{(r)}=1$, the detection delay is
+\begin{equation}
+\mathrm{Delay}_\alpha^{(r)} \equiv \hat\tau_\alpha^{(r)} - \tau(k) > 0.
+\label{eq:delay}
+\end{equation}
+Summary statistics (mean, standard deviation, median, 25th and 75th
+percentiles) are computed over the subset $\{r: D_\alpha^{(r)}=1\}$.
+Premature alarms ($P_\alpha^{(r)}=1$) are excluded from this calculation
+because they have a negative delay and measure a different phenomenon.
+
+\subsection{Full design}
+
+Table~\ref{tab:design} lists all parameter combinations.
+
+\begin{table}[h]
+\centering
+\caption{Monte Carlo design.}
+\label{tab:design}
+\begin{tabular}{lll}
+\toprule
+Parameter & Scenario A (size) & Scenario B (power) \\
+\midrule
+$N$ & $\{10,30\}$ & $\{10,30\}$ \\
+$\delta$ & $0$ & $\{1,2,3\}$ \\
+$k$ & scoring window, $\{0.2,0.3,0.5,1,2,3\}$ & break location, $\{0.2,0.3,0.5,1,2,3\}$ \\
+$M$ & $\{50,80,100,200,300\}$ & $\{50,80,100,200,300\}$ \\
+Factor & $\{1,2,3,4\}$ & $\{1,2,3,4\}$ \\
+$R$ & $2500$ & $2500$ \\
+\midrule
+Combinations & $2\times5\times4 = 40$ & $2\times3\times6\times5\times4 = 720$ \\
+Total replications & $10^5$ & $1.8\times10^6$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For $N=30$, the random coefficients in Table~\ref{tab:N30} are redrawn on
+every replication, so the Monte Carlo averages integrate over both the
+coefficient distribution and the innovation sequences.
+
+\section{Targeted Power Experiments}
+\label{sec:targeted}
+
+The design of Section~\ref{sec:mc} injects a level shift $\delta$ directly
+into every series. A companion design instead breaks the panel
+\emph{indirectly}, through the common factor that loads onto the series,
+and asks whether the monitor still has power when the break works through
+the factor structure rather than through a direct level shift. Four
+experiments are run, crossing two break mechanisms (a break in the
+factor's \emph{volatility} versus a break in its \emph{loading}) with two
+factor structures (a single factor shared by the whole panel versus
+factor-specific subgroups). All four reuse, unchanged, the AR pre-filtering
+of Section~\ref{sec:arfilter}, the pairwise cross-sectional aggregation
+\eqref{eq:ebarclosed}, and the CUSQ statistic and boundary of
+Section~\ref{sec:cusum}: only the data-generating process and the reported
+outcomes differ. The AR coefficients $\hat\beta_{AR}$, the pairwise
+coefficients $(\hat\alpha_{ij},\hat\beta_{ij})$, and the means $\mu_i$ are
+again estimated once on $t=1,\dots,M$ and held fixed thereafter. In all
+four experiments, $k$ no longer plays the dual role of Section~\ref{sec:mc}
+(scoring window in Scenario A, break location in Scenario B): here $k$ is
+only a break location, restricted to $k\in\{0.2,0.3,0.5\}$, and the break
+time is $\tau^*(k) = M + \lfloor kM\rfloor$ as in \eqref{eq:tauk}. Outcomes
+are reported with the alarm/premature/detect/delay logic of
+\eqref{eq:premature}--\eqref{eq:delay}, with $\tau(k)$ replaced by
+$\tau^*(k)$; to match the implementation's column names, the Monte Carlo
+averages $\widehat B_\alpha$, $\widehat P_\alpha$, $\widehat D_\alpha$ are
+denoted $\mathrm{AR}_\alpha$ (alarm rate), $\mathrm{PAR}_\alpha$ (premature
+alarm rate), and $\mathrm{DR}_\alpha$ (detection rate), reported alongside
+the same five delay statistics. $R=2500$ replications are run per
+combination, exactly as in Section~\ref{sec:mc}.
+
+\subsection{Experiment 1: common-factor volatility break}
+\label{subsec:exp1}
+
+Every series loads on factor 4 (the long-memory $\mathrm{ARFIMA}(0,0.45,0)$
+factor of Table~\ref{tab:factors}) with the same fixed loading as
+\eqref{eq:factorload}, $\gamma=0.5$. No level shift is injected; instead,
+the i.i.d.\ $N(0,1)$ innovations that drive factor 4 through fractional
+differencing, \eqref{eq:fracweights}--\eqref{eq:truncconv}, switch standard
+deviation from $1$ to $\sqrt{3}$ at $\tau^*(k)$:
+\begin{equation}
+\varepsilon_{4,t} \sim N(0,1)\ \text{for } t < \tau^*(k), \qquad
+\varepsilon_{4,t} \sim N(0,3)\ \text{for } t \ge \tau^*(k).
+\label{eq:exp1vol}
+\end{equation}
+The idiosyncratic panel (Tables~\ref{tab:N10}--\ref{tab:N30}) is unaffected;
+only the variance of the common shock changes, so the break reaches every
+series solely through the factor loading.
+
+\subsection{Experiment 2: common-factor loading break}
+\label{subsec:exp2}
+
+Each factor $j\in\{1,2,3,4\}$ is now considered separately (no volatility
+break: the factor itself is generated exactly as in Table~\ref{tab:factors}
+throughout). Instead, every series' loading on $f_{j,t}$ jumps from
+$\gamma_{\text{pre}}=0.1$ to $\gamma_{\text{post}}=0.8$ at $\tau^*(k)$:
+\begin{equation}
+Y^*_{i,t} = Y_{i,t} + \gamma(t)\, f_{j,t}, \qquad
+\gamma(t) = \begin{cases} 0.1, & t < \tau^*(k) \\ 0.8, & t \ge \tau^*(k), \end{cases}
+\qquad i=1,\dots,N.
+\label{eq:exp2load}
+\end{equation}
+Because each of the four factors is run as a separate combination, the
+parameter grid additionally ranges over $\mathrm{factor}\in\{1,2,3,4\}$, as
+in Scenario B of Section~\ref{sec:mc}.
+
+\subsection{Experiments 3.1--3.2: heterogeneous (subgroup) factor structure}
+\label{subsec:exp3}
+
+Experiments~\ref{subsec:exp1}--\ref{subsec:exp2} load every series on the
+same single factor. Experiments 3.1 and 3.2 instead partition the $N$
+series into three disjoint subgroups $G_2, G_3, G_4$, each loading on a
+\emph{different} factor ($f_2$, $f_3$, $f_4$ respectively) and on no other
+factor (Table~\ref{tab:exp3groups}). Because no factor is shared by the
+whole panel, the panel-wide pooled signal is, by construction, only
+partially informative about a break confined to a single subgroup --- this
+is the sense in which the factor structure is "weak" relative to
+Experiments~\ref{subsec:exp1}--\ref{subsec:exp2}.
+
+\begin{table}[h]
+\centering
+\caption{Subgroup composition for Experiments 3.1--3.2.}
+\label{tab:exp3groups}
+\begin{tabular}{cccc}
+\toprule
+& Factor & $N=10$ & $N=30$ \\
+\midrule
+$G_2$ & $f_2$ & $\{s_1,s_2,s_3\}$ & $\{s_1,\dots,s_3\}$ \\
+$G_3$ & $f_3$ & $\{s_4,s_5,s_6\}$ & $\{s_4,\dots,s_{12}\}$ \\
+$G_4$ & $f_4$ & $\{s_7,\dots,s_{10}\}$ & $\{s_{13},\dots,s_{30}\}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For every replication, AR filtering is applied to the whole panel exactly
+as in Section~\ref{sec:arfilter} --- each series keeps its own fixed AR$(p)$
+coefficients regardless of subgroup membership. Two CUSQ tests are then
+computed from the \emph{same} AR residuals: a full-panel test using
+\eqref{eq:ebarclosed} with all $N$ columns, and, for each $g\in\{2,3,4\}$, a
+subgroup test using \eqref{eq:ebarclosed} restricted to the $|G_g|$ columns
+in $G_g$ only. The closed form of Proposition~\ref{prop:ebar} applies
+verbatim to any subset of columns, so the subgroup tests require no
+additional derivation; only the cross-sectional aggregation step changes,
+never the AR filtering. This lets each replication compare whole-panel
+monitoring against subgroup-specific monitoring for a break confined to one
+subgroup.
+
+\textbf{Experiment 3.1 (volatility break).} Each subgroup's own factor
+receives the same volatility break as \eqref{eq:exp1vol} (std.\ $1\to\sqrt3$
+at $\tau^*(k)$), with a fixed loading $\gamma=0.5$, applied only to the
+columns in that subgroup.
+
+\textbf{Experiment 3.2 (loading break).} Each subgroup's own factor has
+constant volatility, but the subgroup's loading on it jumps from a
+subgroup-specific $\gamma_{\text{pre}}$ to $\gamma_{\text{post}}$ at
+$\tau^*(k)$ (Table~\ref{tab:exp32loadings}), analogous to
+\eqref{eq:exp2load} but applied subgroup-by-subgroup with its own factor.
+
+\begin{table}[h]
+\centering
+\caption{Pre- and post-break loadings for Experiment 3.2.}
+\label{tab:exp32loadings}
+\begin{tabular}{cccc}
+\toprule
+Subgroup & Factor & $\gamma_{\text{pre}}$ & $\gamma_{\text{post}}$ \\
+\midrule
+$G_2$ & $f_2$ & $0.10$ & $0.60$ \\
+$G_3$ & $f_3$ & $0.25$ & $0.85$ \\
+$G_4$ & $f_4$ & $0.30$ & $0.90$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For both 3.1 and 3.2, the full-panel metrics are reported with prefix
+``full\_'' and each subgroup $g$'s metrics with prefix ``g$g$\_''. In
+addition, for every pair of subgroups $(a,b)\in\{(2,3),(3,4),(2,4)\}$ the
+gap in $5\%$-level detection rate is reported,
+\begin{equation}
+\Delta\mathrm{DR}_{g_a,g_b} \equiv \mathrm{DR}_{g_a,5\%} - \mathrm{DR}_{g_b,5\%},
+\label{eq:deltaDR}
+\end{equation}
+summarizing whether a break carried by a more persistent (higher-$d$ or
+higher-$\phi$) factor is detected more or less reliably than one carried by
+a less persistent factor.
+
+\subsection{Design summary}
+
+Table~\ref{tab:targeteddesign} lists the four experiments' combinations.
+$M$, factor, and the $N=30$ random-coefficient redraw rule are exactly as
+in Table~\ref{tab:design}.
+
+\begin{table}[h]
+\centering
+\caption{Targeted power experiment design.}
+\label{tab:targeteddesign}
+\begin{tabular}{lcccc}
+\toprule
+Experiment & $N$ & $M$ & $k$ & Factor \\
+\midrule
+1 (factor-4 vol.\ break)        & $\{10,30\}$ & $\{50,80,100,200,300\}$ & $\{0.2,0.3,0.5\}$ & --- \\
+2 (loading break)               & $\{10,30\}$ & $\{50,80,100,200,300\}$ & $\{0.2,0.3,0.5\}$ & $\{1,2,3,4\}$ \\
+3.1 (subgroup vol.\ break)      & $\{10,30\}$ & $\{50,80,100,200,300\}$ & $\{0.2,0.3,0.5\}$ & --- \\
+3.2 (subgroup loading break)    & $\{10,30\}$ & $\{50,80,100,200,300\}$ & $\{0.2,0.3,0.5\}$ & --- \\
+\midrule
+\multicolumn{5}{l}{Combinations: $30+120+30+30=210$; $R=2500$ each; total replications $=5.25\times10^5$.} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Computational Details}
+\label{sec:computation}
+
+The full design requires $1.9\times10^6$ replications. Two changes to the
+implementation reduce computation time substantially without changing any
+statistic.
+
+\subsection{FFT-based fractional differencing}
+\label{subsec:fftfrac}
+
+An ARFIMA process requires applying the fractional integration operator
+$(1-L)^{-d}$, which has the moving-average representation
+\begin{equation}
+(1-L)^{-d} = \sum_{j=0}^{\infty} w_j L^j, \qquad
+w_j = \frac{\Gamma(j+d)}{\Gamma(j+1)\,\Gamma(d)}.
+\label{eq:fracweights}
+\end{equation}
+Given a short-memory series $Y_t$, the fractionally integrated series is
+\begin{equation}
+X_t = \sum_{j=0}^{t} w_j Y_{t-j}, \qquad t=0,1,\dots,T-1.
+\label{eq:truncconv}
+\end{equation}
+Computing \eqref{eq:truncconv} by a direct loop costs $O(T^2)$ operations.
+The same result can be obtained by the discrete convolution
+\begin{equation}
+(w*Y) = \mathcal{F}^{-1}\bigl[\mathcal{F}(w) \odot \mathcal{F}(Y)\bigr],
+\label{eq:convthm}
+\end{equation}
+where $\mathcal{F}$ is the DFT computed by the FFT algorithm, at cost
+$O(T\log T)$. The first $T$ elements of $(w*Y)$ equal \eqref{eq:truncconv}
+exactly. For numerical stability, the weights are computed in log space:
+\begin{equation}
+w_j = \exp\bigl[\ln\Gamma(j+d) - \ln\Gamma(j+1) - \ln\Gamma(d)\bigr],
+\label{eq:gammaln}
+\end{equation}
+which avoids overflow for large $j$. For $T=4000$, this reduces the
+fractional differencing step from hundreds of milliseconds to under one
+millisecond per series.
+
+\subsection{Vectorized AR residuals}
+\label{subsec:vectorAR}
+
+Equation \eqref{eq:residual} computes one residual per time period. A
+direct implementation loops over $t$ and computes a dot product at each
+step, incurring $T-p$ separate Python function call overheads. The same
+result follows from a single matrix multiplication.
+
+\begin{lemma}
+\label{lem:vector}
+Let $t_0 = \max(8,\,p+1)$ and $\mathcal{I} = \{t_0,\dots,T\}$. Define
+the lag matrix $Z \in \mathbb{R}^{|\mathcal{I}|\times p}$ by
+\begin{equation}
+Z_{t,\ell} = Y_{i,\,t-\ell}, \qquad \ell=1,\dots,p,\quad t\in\mathcal{I},
+\label{eq:lagmatrix}
+\end{equation}
+and let $y = (Y_{i,t})_{t\in\mathcal{I}}$. Then
+\begin{equation}
+(\hat e_{i,t})_{t\in\mathcal{I}} = y - Z\hat\beta_{AR}.
+\label{eq:vecresid}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Row $t$ of $Z\hat\beta_{AR}$ equals
+$\sum_{\ell=1}^p \hat\beta_{AR,\ell}\,Y_{i,t-\ell}$, which is the
+predicted value in \eqref{eq:residual}. So
+$(y - Z\hat\beta_{AR})_t = \hat e_{i,t}$ for every $t\in\mathcal{I}$.
+\end{proof}
+
+The matrix $Z$ is formed once and the residuals for all periods are
+obtained in a single BLAS call. For $T\approx3000$ and $p\le6$, this is
+about 30 times faster than the loop version, with identical numerical
+output.
+
+\subsection{Parallelisation}
+\label{subsec:aggregate}
+
+After both improvements, the time for one replication at $N=30$, $M=300$
+falls from roughly $0.14$ seconds to roughly $0.02$ seconds, a reduction
+of about $8\times$. Across $1.9\times10^6$ replications, this brings the
+projected single-thread runtime from about 72 hours to about 9.5 hours.
+
+The 760 parameter combinations in Table~\ref{tab:design} are independent
+of one another, so each combination is assigned to one of 8 worker
+processes. Each worker is seeded from OS entropy to ensure independent
+random streams across processes. With 8-way parallelism, the expected
+wall-clock time is 1--1.5 hours.
+
+The unpooled pairwise aggregation of Section~\ref{sec:pool} adds an
+$O(N^2M)$ Gram-matrix step per replication that was not present under
+pooling. For the grid used here ($N\le30$, $M\le300$) this step is small
+relative to data generation and AR filtering, so the per-replication
+timings above are not expected to change materially, but they should be
+re-benchmarked after the implementation update rather than assumed.
+
+\section{Summary}
+\label{sec:summary}
+
+Scenario A produces 240 rows (40 combinations $\times$ 6 values of $k$),
+each reporting $\widehat{\mathrm{Size}}_\alpha$ for
+$\alpha\in\{10\%,5\%,1\%\}$. Scenario B produces 720 rows, each reporting
+$\widehat{B}_\alpha$, $\widehat{P}_\alpha$, $\widehat{D}_\alpha$, and the
+five delay statistics for each $\alpha$.
+
+In every replication, the CUSQ statistic uses $D_n = C_n/C_m - (n-2)/(m-2)$
+from \eqref{eq:Dn} and the boundary $g(n/m)$ from \eqref{eq:boundary},
+both as specified in \citet{WangHsiao2013}.
+Propositions~\ref{prop:ab} and \ref{prop:ebar} ensure that the (unpooled)
+cross-pair aggregate $\bar e_t$, with every pair $(i,j)$ contributing its
+own fitted slope $\hat\beta_{ij}$, is nonetheless computed exactly, at cost
+$O(N^2M)+O(NT)$ instead of $O(N^2M)+O(N^2T)$ for a direct pair-by-pair
+evaluation. Lemma~\ref{lem:vector} and the FFT-based
+fractional-differencing step ensure that all residuals are numerically
+identical to a direct implementation.
+
+\begin{thebibliography}{9}
+
+\bibitem[Brown et al.(1975)]{BrownDurbinEvans1975}
+Brown, R.~L., J.~Durbin, and J.~M.~Evans (1975).
+\newblock Techniques for testing the constancy of regression relationships
+  over time.
+\newblock \emph{Journal of the Royal Statistical Society, Series B}, 37,
+  149--163.
+
+\bibitem[Chu et al.(1996)]{ChuStinchcombeWhite1996}
+Chu, C.-S.~J., M.~Stinchcombe, and H.~White (1996).
+\newblock Monitoring structural change.
+\newblock \emph{Econometrica}, 64(5), 1045--1065.
+
+\bibitem[Inclan and Tiao(1994)]{InclanTiao1994}
+Inclan, C.\ and G.~C.~Tiao (1994).
+\newblock Use of cumulative sums of squares for retrospective detection of
+  changes of variance.
+\newblock \emph{Journal of the American Statistical Association}, 89(427),
+  913--923.
+
+\bibitem[Poskitt(2007)]{Poskitt2007}
+Poskitt, D.~S.\ (2007).
+\newblock Autoregressive approximation in nonstandard situations: the
+  fractionally integrated and non-invertible cases.
+\newblock \emph{Annals of the Institute of Statistical Mathematics}, 59,
+  697--725.
+
+\bibitem[Wang and Hsiao(2013)]{WangHsiao2013}
+Wang, C.~S.-H.\ and C.~Hsiao (2013).
+\newblock Real-time monitoring test for realized volatility.
+\newblock \emph{Journal of Time Series Econometrics}, 5(1), 1--24.
+
+\end{thebibliography}
+
+\end{document}
